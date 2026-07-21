@@ -327,22 +327,7 @@ export async function inicializarBaseDatos() {
       await connection.query("ALTER TABLE cierres_caja ADD COLUMN estado ENUM('abierta', 'listo_para_cierre', 'por_cerrar', 'cerrada') DEFAULT 'abierta'");
     }
 
-    // Auto-cerrar cajas huérfanas de días anteriores
-    try {
-      const formatter = new Intl.DateTimeFormat('sv-SE', {
-        timeZone: 'America/Managua',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit'
-      });
-      const hoyNica = formatter.format(new Date());
-      await connection.query(
-        "UPDATE cierres_caja SET estado = 'cerrada' WHERE tipo = 'apertura' AND estado IN ('abierta', 'listo_para_cierre', 'por_cerrar') AND fecha_caja < ?",
-        [hoyNica]
-      );
-    } catch (e) {
-      console.error("Error al auto-cerrar cajas huérfanas en db.js:", e.message);
-    }
+
 
     // === NUEVAS TABLAS: SISTEMA DE BODEGAS ===
     await connection.query(`

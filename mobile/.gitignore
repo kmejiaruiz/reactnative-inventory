@@ -39,3 +39,9 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Archivos de configuración de IA
+AGENTS.md
+CLAUDE.md
+.claude/
+

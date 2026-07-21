@@ -1,0 +1,8 @@
+# Dependencias y entorno
+node_modules/
+.env
+.env*.local
+
+# Scripts de prueba y simulación
+simular_huerfana.js
+test_*.js

@@ -97,9 +97,10 @@ const obtenerFechaNicaragua = () => {
 // Conciliar cajas huerfanas de dias anteriores creando un registro de cierre automatico
 const reconciliarCajasHuerfanas = async (dbPool) => {
   const hoy = obtenerFechaNicaragua();
+  const timestamp = obtenerTimestampLog();
   try {
     const [huerfanas] = await dbPool.query(
-      `SELECT c.id, c.vendedor_id, c.fecha_caja, c.fondo_inicial, u.nombre as vendedor_nombre
+      `SELECT c.id, c.vendedor_id, c.fecha_caja, c.fondo_inicial, c.estado as estado_anterior, u.nombre as vendedor_nombre
        FROM cierres_caja c
        JOIN usuarios u ON c.vendedor_id = u.id
        WHERE c.tipo = 'apertura' 
@@ -107,6 +108,15 @@ const reconciliarCajasHuerfanas = async (dbPool) => {
          AND c.fecha_caja < ?`,
       [hoy]
     );
+
+    if (huerfanas.length === 0) {
+      console.log(`${timestamp} [RECONCILIACIÓN] No se encontraron cajas huérfanas pendientes de días anteriores.`);
+      return;
+    }
+
+    console.log(`${timestamp} [RECONCILIACIÓN ATENCIÓN] Se encontraron ${huerfanas.length} caja(s) huérfana(s) de días anteriores sin cerrar. Procesando reconciliación...`);
+
+    let reconciliadasCount = 0;
 
     for (const box of huerfanas) {
       const dateVal = box.fecha_caja;
@@ -151,10 +161,16 @@ const reconciliarCajasHuerfanas = async (dbPool) => {
         "INSERT INTO bitacora (usuario_id, accion, descripcion) VALUES (NULL, 'AUTO_CIERRE_CAJA', ?)",
         [`Cierre automático de caja del vendedor "${box.vendedor_nombre}" (ID: ${box.vendedor_id}) del día ${dateStr}. Ventas: C$${totalVentas.toFixed(2)}, Fondo: C$${fondo.toFixed(2)}.`]
       );
-      console.log(`[Auto-Cierre] Caja huerfana ID ${box.id} reconciliada con exito.`);
+
+      reconciliadasCount++;
+      console.log(
+        `${timestamp} [RECONCILIADA] Caja #${box.id} | Vendedor: "${box.vendedor_nombre}" (ID: ${box.vendedor_id}) | Fecha Caja: ${dateStr} | Fondo Inicial: C$${fondo.toFixed(2)} | Ventas Sistema: C$${totalVentas.toFixed(2)} | Estado Anterior: '${box.estado_anterior}' -> Cerrada`
+      );
     }
+
+    console.log(`${timestamp} [RECONCILIACIÓN OK] Total de ${reconciliadasCount} caja(s) huérfana(s) reconciliada(s) y cerrada(s) con éxito.`);
   } catch (error) {
-    console.error("Error al reconciliar cajas huerfanas:", error);
+    console.error(`${timestamp} [RECONCILIACIÓN ERROR] Error al reconciliar cajas huérfanas:`, error.message);
   }
 };
 
