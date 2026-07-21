@@ -14,24 +14,36 @@ const pool = mysql.createPool({
   queueLimit: 0
 });
 
+const obtenerTimestamp = () => {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `[${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}]`;
+};
+
 export async function inicializarBaseDatos() {
+  const dbHost = process.env.DB_HOST || '127.0.0.1';
+  const dbUser = process.env.DB_USER || 'root';
   const dbName = process.env.DB_NAME || 'proyecto_db';
+
+  console.log(`${obtenerTimestamp()} [BD INTENTO] Estableciendo contacto con el servidor MySQL (${dbHost}) como usuario '${dbUser}'...`);
+
   try {
     // 1. Crear conexión temporal para asegurar la existencia de la Base de Datos
     const tempConnection = await mysql.createConnection({
-      host: process.env.DB_HOST || '127.0.0.1',
-      user: process.env.DB_USER || 'root',
+      host: dbHost,
+      user: dbUser,
       password: process.env.DB_PASSWORD || ''
     });
 
-    console.log(`Verificando existencia de la base de datos '${dbName}'...`);
+    console.log(`${obtenerTimestamp()} [BD CHECK] Verificando/Creando base de datos '${dbName}'...`);
     await tempConnection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
     await tempConnection.end();
-    console.log(`Base de datos '${dbName}' asegurada.`);
+    console.log(`${obtenerTimestamp()} [BD OK] Base de datos '${dbName}' verificada y lista.`);
 
     // 2. Conectar mediante el pool normal
+    console.log(`${obtenerTimestamp()} [BD POOL] Obteniendo conexión desde el pool de MySQL (Límite: 10 conex)...`);
     const connection = await pool.getConnection();
-    console.log('Conexión con MySQL establecida correctamente.');
+    console.log(`${obtenerTimestamp()} [BD CONECTADO] Conexión MySQL establecida y activa en el pool.`);
 
     // Crear tablas base si no existen (en orden de dependencias)
     await connection.query(`
@@ -573,8 +585,10 @@ export async function inicializarBaseDatos() {
     }
 
     connection.release();
+    console.log(`${obtenerTimestamp()} [BD OK] Todas las tablas y semillas de la base de datos están sincronizadas correctamente.`);
   } catch (error) {
-    console.error('Error al inicializar la base de datos:', error.message);
+    console.error(`${obtenerTimestamp()} [BD ERROR CRÍTICO] Fallo al inicializar la base de datos MySQL: ${error.message}`);
+    console.error(`${obtenerTimestamp()} [BD CONSEJO] Por favor verifica que XAMPP / MySQL esté iniciado en el host '${process.env.DB_HOST || '127.0.0.1'}' y que el usuario '${process.env.DB_USER || 'root'}' tenga permisos.`);
   }
 }
 

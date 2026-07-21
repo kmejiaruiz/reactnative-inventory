@@ -3,6 +3,7 @@ import cors from "cors";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
+import os from "os";
 import pool, { inicializarBaseDatos } from "./db.js";
 import { verificarToken, verificarRol } from "./auth.js";
 
@@ -14,6 +15,73 @@ const JWT_SECRET = process.env.JWT_SECRET || "clave_secreta_para_jwt_12345";
 
 app.use(cors());
 app.use(express.json());
+
+// Función para obtener timestamp legible en logs
+const obtenerTimestampLog = () => {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `[${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}]`;
+};
+
+// Función para detectar el tipo de dispositivo móvil o cliente desde el User-Agent
+const obtenerDetallesDispositivo = (userAgent = "") => {
+  if (!userAgent) return "Dispositivo Desconocido";
+  const ua = userAgent.toLowerCase();
+  
+  if (ua.includes("expo")) {
+    return "App Movil (Expo / React Native)";
+  } else if (ua.includes("android")) {
+    const matchModel = userAgent.match(/Android[^;]+; ([^;)]+)/i);
+    const modelo = matchModel ? matchModel[1].trim() : "Android";
+    return `Celular Android (${modelo})`;
+  } else if (ua.includes("iphone")) {
+    return "iPhone (iOS)";
+  } else if (ua.includes("ipad")) {
+    return "iPad (iOS)";
+  } else if (ua.includes("okhttp")) {
+    return "Dispositivo Movil Android (OkHttp / React Native)";
+  } else if (ua.includes("darwin") || ua.includes("cfnetwork")) {
+    return "Dispositivo iOS (React Native Fetch)";
+  } else if (ua.includes("postmanruntime")) {
+    return "Cliente Postman";
+  } else if (ua.includes("chrome")) {
+    return "Navegador Web (Chrome)";
+  } else if (ua.includes("firefox")) {
+    return "Navegador Web (Firefox)";
+  } else if (ua.includes("safari")) {
+    return "Navegador Web (Safari)";
+  } else if (ua.includes("node-fetch") || ua.includes("axios")) {
+    return "Cliente HTTP (Axios/Node)";
+  }
+  
+  return `Cliente (${userAgent.substring(0, 35)}...)`;
+};
+
+// Middleware para registrar en consola todas las conexiones y peticiones en todo momento
+app.use((req, res, next) => {
+  const start = Date.now();
+  const rawIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '';
+  // Limpiar formato IPv6 loopback o prefijo ::ffff:
+  const clientIp = rawIp.replace(/^::ffff:/, '').replace(/^::1$/, '127.0.0.1');
+  const userAgent = req.headers['user-agent'] || '';
+  const infoDispositivo = obtenerDetallesDispositivo(userAgent);
+
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const timestamp = obtenerTimestampLog();
+    const status = res.statusCode;
+    
+    let statusSimbolo = '[OK]';
+    if (status >= 400 && status < 500) statusSimbolo = '[WARN]';
+    if (status >= 500) statusSimbolo = '[ERROR]';
+
+    console.log(
+      `${timestamp} ${statusSimbolo} [PETICIÓN HTTP] ${req.method} ${req.originalUrl} | Estado: ${status} (${duration}ms) | IP: ${clientIp} | Dispositivo: ${infoDispositivo}`
+    );
+  });
+
+  next();
+});
 
 const obtenerFechaNicaragua = () => {
   const d = new Date();
@@ -3157,7 +3225,7 @@ app.get(
   }
 );
 
-// Verificar si todas las categorías con stock han sido auditadas y aplicadas para una bodega
+// Verificar si todas las categorías con stock han sido auditadas o si el conteo está bloqueado por falta de ventas
 app.get(
   "/api/bodegas/:id/check-audit-status",
   verificarToken,
@@ -3165,7 +3233,33 @@ app.get(
   async (req, res) => {
     const { id } = req.params;
     try {
-      // 1. Obtener categorías con stock > 0 en esta bodega
+      // 1. Obtener la fecha del último conteo aplicado en esta bodega
+      const [[lastAudit]] = await pool.query(
+        `SELECT MAX(fecha_aplicado) as last_applied 
+         FROM conteos_inventario 
+         WHERE bodega_id = ? AND estado = 'aplicado'`,
+        [id]
+      );
+
+      let salesCount = 0;
+      let salesNeeded = 5;
+      let restrictionActive = false;
+
+      if (lastAudit && lastAudit.last_applied) {
+        // 2. Contar ventas completadas después de la fecha del último conteo
+        const [[{ count: countSales }]] = await pool.query(
+          `SELECT COUNT(*) as count 
+           FROM ventas 
+           WHERE estado = 'completado' AND fecha > ?`,
+          [lastAudit.last_applied]
+        );
+        salesCount = countSales;
+        if (salesCount < salesNeeded) {
+          restrictionActive = true;
+        }
+      }
+
+      // 3. Obtener categorías con stock > 0 en esta bodega
       const [activeCats] = await pool.query(
         `SELECT DISTINCT p.categoria_id
          FROM stock_bodegas sb
@@ -3174,26 +3268,28 @@ app.get(
         [id]
       );
 
-      // 2. Obtener categorías con conteo aplicado en esta bodega
-      const [appliedCats] = await pool.query(
+      // 4. Obtener categorías con conteo (borrador o aplicado hoy) en esta bodega
+      const [todayCats] = await pool.query(
         `SELECT DISTINCT categoria_id
          FROM conteos_inventario
-         WHERE bodega_id = ? AND estado = 'aplicado'`,
+         WHERE bodega_id = ? AND (estado = 'borrador' OR (estado = 'aplicado' AND DATE(fecha_aplicado) = CURDATE()))`,
         [id]
       );
 
       const activeCatIds = activeCats.map(c => c.categoria_id).filter(Boolean);
-      const appliedCatIds = appliedCats.map(c => c.categoria_id).filter(Boolean);
+      const todayCatIds = todayCats.map(c => c.categoria_id).filter(Boolean);
 
-      // Si no hay stock o si todas las categorías con stock tienen al menos un conteo aplicado, es true
+      // Bloqueado si la bodega está vacía (como merma vacía), si ya se auditó todo hoy, o si falta registrar ventas
       const allCategoriesCounted = activeCatIds.length === 0 || activeCatIds.every(
-        catId => appliedCatIds.includes(catId)
+        catId => todayCatIds.includes(catId)
       );
 
       res.json({
-        allCategoriesCounted,
-        activeCategoriesCount: activeCatIds.length,
-        appliedCategoriesCount: appliedCatIds.length
+        allCategoriesCounted: allCategoriesCounted || restrictionActive,
+        restrictionActive,
+        salesCount,
+        salesNeeded,
+        lastAppliedDate: lastAudit ? lastAudit.last_applied : null
       });
     } catch (error) {
       console.error("Error al verificar estado de auditoría de bodega:", error);
@@ -3585,12 +3681,45 @@ app.post(
 
 // Inicializar base de datos y arrancar el servidor
 inicializarBaseDatos().then(async () => {
+  const timestamp = obtenerTimestampLog();
+  console.log(`${timestamp} [RECONCILIACIÓN] Verificando cierres de caja huérfanos de días anteriores...`);
   try {
     await reconciliarCajasHuerfanas(pool);
   } catch (err) {
-    console.error("Error en reconciliacion inicial de cajas huerfanas:", err);
+    console.error(`${timestamp} [RECONCILIACIÓN ERROR] Error en reconciliación inicial:`, err);
   }
+
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Servidor Express corriendo en http://localhost:${PORT}`);
+    const interfaces = os.networkInterfaces();
+    const ipsLocales = [];
+    
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          ipsLocales.push(iface.address);
+        }
+      }
+    }
+
+    const redInfo = ipsLocales.length > 0 
+      ? ipsLocales.map(ip => `   • Red Local:    http://${ip}:${PORT}  <-- Usar esta IP en la App Móvil`).join('\n')
+      : '   • Red Local:    No se detectó otra interfaz de red';
+
+    console.log(`
+===================================================================
+SERVIDOR BACKEND INICIADO Y ESCUCHANDO CONEXIONES EN TODO MOMENTO
+===================================================================
+[CONFIGURACION DE CONEXION BASE DE DATOS (.env)]
+   • Host DB:      ${process.env.DB_HOST || '127.0.0.1'}
+   • Usuario DB:   ${process.env.DB_USER || 'root'}
+   • Base Datos:   ${process.env.DB_NAME || 'proyecto_db'}
+   • Puerto App:   ${PORT}
+
+[URLS DE ACCESO PARA DISPOSITIVOS MOVILES / WEB]
+   • Localhost:    http://localhost:${PORT}
+${redInfo}
+===================================================================
+[MONITOREO ACTIVO] Registrando conexiones y peticiones en tiempo real...
+`);
   });
 });
